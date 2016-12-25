@@ -8,14 +8,15 @@ from sklearn.cross_validation import cross_val_score
 from sklearn.ensemble import RandomForestRegressor,GradientBoostingRegressor
 from sklearn.grid_search import GridSearchCV
 from sklearn.preprocessing import LabelEncoder
+from xgboost import XGBRegressor
+from sklearn.linear_model import Lasso
 
 if __name__ == '__main__':
-    o_train = pd.read_csv('data/train.csv')
-    o_test = pd.read_csv('data/test.csv')
+    train = pd.read_csv('data/full_train.csv')
+    test = pd.read_csv('data/test.csv')
 
+    train = train[0:1601]
     # 删除id列
-    train = o_train.drop('Id',axis=1)
-    test = o_test.drop('Id',axis=1)
 
     # 删除异常条目，有些居住面积大于4000平方英尺的数据显然有问题
     train.drop(train[train["GrLivArea"] > 4000].index, inplace=True)
@@ -40,6 +41,9 @@ if __name__ == '__main__':
 
     def munge(df):
         all_df = pd.DataFrame(index=df.index)
+
+        all_df["HouseAge"] = df["HouseAge"]
+        all_df["RemodAge"] = df["RemodAge"]
 
         all_df["LotFrontage"] = df["LotFrontage"]
         for key, group in lot_frontage_by_neighborhood:
@@ -282,7 +286,7 @@ if __name__ == '__main__':
             {1: 1, 2: 1, 3: 1, 4: 2, 5: 2})
 
         # Bin by neighborhood (a little arbitrarily). Values were computed by:
-        # train_df["SalePrice"].groupby(train_df["Neighborhood"]).median().sort_values()
+        # train["SalePrice"].groupby(train["Neighborhood"]).median().sort_values()
         neighborhood_map = {
             "MeadowV": 0,  # 88000
             "IDOTRR": 1,  # 103000
@@ -334,72 +338,227 @@ if __name__ == '__main__':
     X_train = munge(train)
     X_test = munge(test)
 
-    # Alley, PoolQC,Fence，FireplaceQu,MiscFeature大量缺失，用新的属性填充
-    train['Alley'].fillna('NAN',inplace=True)
-    train['PoolQC'].fillna('NAN', inplace=True)
-    train['Fence'].fillna('NAN', inplace=True)
-    train['FireplaceQu'].fillna('NAN', inplace=True)
-    train['MiscFeature'].fillna('NAN', inplace=True)
-    test['Alley'].fillna('NAN', inplace=True)
-    test['PoolQC'].fillna('NAN', inplace=True)
-    test['Fence'].fillna('NAN', inplace=True)
-    test['FireplaceQu'].fillna('NAN', inplace=True)
-    test['MiscFeature'].fillna('NAN', inplace=True)
+    print(X_train.info())
+    print(X_test.info())
 
-    print(train.info())
-    # 数据缺失值用均值代替
-    train['LotFrontage'].fillna(train['LotFrontage'].mean(),inplace=True)
-    train['MasVnrArea'].fillna(train['MasVnrArea'].mean(), inplace=True)
-    test['LotFrontage'].fillna(test['LotFrontage'].mean(), inplace=True)
-    test['MasVnrArea'].fillna(test['MasVnrArea'].mean(), inplace=True)
-    test['BsmtFinSF1'].fillna(test['BsmtFinSF1'].mean(), inplace=True)
-    test['BsmtFinSF2'].fillna(test['BsmtFinSF2'].mean(), inplace=True)
-    test['BsmtUnfSF'].fillna(test['BsmtUnfSF'].mean(), inplace=True)
-    test['TotalBsmtSF'].fillna(test['TotalBsmtSF'].mean(), inplace=True)
-    test['BsmtFullBath'].fillna(test['BsmtFullBath'].mean(), inplace=True)
-    test['BsmtHalfBath'].fillna(test['BsmtHalfBath'].mean(), inplace=True)
-    test['GarageArea'].fillna(test['BsmtHalfBath'].mean(), inplace=True)
-    test['GarageCars'].fillna(test['BsmtHalfBath'].mean(), inplace=True)
-    test['GarageYrBlt'].fillna(test['GarageYrBlt'].mean(), inplace=True)
-    print(train.info())
-    # 其余缺失值均用众数代替
-    train.fillna(train.mode().loc[0], inplace=True)
-    test.fillna(test.mode().loc[0], inplace=True)
+    print(X_train.shape)
+    print(X_test.shape)
 
-    X_train = train.drop('SalePrice',axis=1)
-    Y_train = train['SalePrice']
-    # 向量化
-    dict_vec = DictVectorizer(sparse=False)
-    X_train = dict_vec.fit_transform(X_train.to_dict(orient='record'))
-    print(dict_vec.feature_names_)
-    feature_name = dict_vec.feature_names_
+    # Copy NeighborhoodBin into a temporary DataFrame because we want to use the
+    # unscaled version later on (to one-hot encode it).
+    neighborhood_bin_train = pd.DataFrame(index=train.index)
+    neighborhood_bin_train["NeighborhoodBin"] = X_train["NeighborhoodBin"]
+    neighborhood_bin_test = pd.DataFrame(index=test.index)
+    neighborhood_bin_test["NeighborhoodBin"] = X_test["NeighborhoodBin"]
+
+    ################################################################################
+
+    numeric_features = X_train.dtypes[X_train.dtypes != "object"].index
+
+    # Transform the skewed numeric features by taking log(feature + 1).
+    # This will make the features more normal.
+    from scipy.stats import skew
+
+    skewed = X_train[numeric_features].apply(lambda x: skew(x.dropna().astype(float)))
+    skewed = skewed[skewed > 0.75]
+    skewed = skewed.index
+
+    X_train[skewed] = np.log1p(X_train[skewed])
+    X_test[skewed] = np.log1p(X_test[skewed])
+
+    # Additional processing: scale the data.
+    from sklearn.preprocessing import StandardScaler
+
+    scaler = StandardScaler()
+    scaler.fit(X_train[numeric_features])
+
+    scaled = scaler.transform(X_train[numeric_features])
+    for i, col in enumerate(numeric_features):
+        X_train[col] = scaled[:, i]
+
+    scaled = scaler.transform(X_test[numeric_features])
+    for i, col in enumerate(numeric_features):
+        X_test[col] = scaled[:, i]
 
 
-    # select_feature = [0, 1, 2, 4, 5, 6, 7, 12, 13, 15, 16, 17, 18, 19, 20, 21, 22, 24, 26, 27, 33, 34, 35, 36, 38, 39, 40, 41, 42, 45, 65, 67, 68, 70, 71, 73, 74, 78, 80, 81, 83, 84, 87, 88, 95, 96, 98, 100, 103, 104, 110, 111, 113, 114, 116, 117, 118, 119, 120, 124, 129, 131, 132, 133, 139, 140, 141, 148, 150, 152, 153, 154, 155, 162, 163, 164, 166, 167, 168, 170, 173, 176, 177, 179, 180, 181, 182, 183, 184, 185, 186, 188, 189, 190, 193, 194, 195, 196, 198, 199, 200, 201, 204, 205, 206, 208, 209, 210, 217, 222, 223, 224, 225, 230, 233, 234, 235, 239, 240, 241, 243, 244, 245, 246, 248, 254, 262, 263, 265, 268, 271, 272, 273, 280, 282, 283, 286, 287, 290, 291, 292, 293]
-    #
-    # select_X_train = [[] for i in range(X_train.shape[0])]
-    # for i in range(X_train.shape[0]):
-    #     for j in select_feature:
-    #         select_X_train[i].append(X_train[i][j])
-    #
-    # select_feature = np.array(select_X_train)
-    # 向量化后，可能有些属性在test中从未出现，我们加上这些属性，并将对应列置0，填充test使之与train的维数相同
+    ################################################################################
 
-    # rfr = RandomForestRegressor(n_estimators=300, max_depth=15, min_samples_split=2, max_features=None,
-    #                             min_samples_leaf=1, )
+    # Convert categorical features using one-hot encoding.
+    def onehot(onehot_df, df, column_name, fill_na, drop_name):
+        onehot_df[column_name] = df[column_name]
+        if fill_na is not None:
+            onehot_df[column_name].fillna(fill_na, inplace=True)
+
+        dummies = pd.get_dummies(onehot_df[column_name], prefix="_" + column_name)
+
+        # Dropping one of the columns actually made the results slightly worse.
+        # if drop_name is not None:
+        #     dummies.drop(["_" + column_name + "_" + drop_name], axis=1, inplace=True)
+
+        onehot_df = onehot_df.join(dummies)
+        onehot_df = onehot_df.drop([column_name], axis=1)
+        return onehot_df
+
+
+    def munge_onehot(df):
+        onehot_df = pd.DataFrame(index=df.index)
+
+        onehot_df = onehot(onehot_df, df, "MSSubClass", None, "40")
+        onehot_df = onehot(onehot_df, df, "MSZoning", "RL", "RH")
+        onehot_df = onehot(onehot_df, df, "LotConfig", None, "FR3")
+        onehot_df = onehot(onehot_df, df, "Neighborhood", None, "OldTown")
+        onehot_df = onehot(onehot_df, df, "Condition1", None, "RRNe")
+        onehot_df = onehot(onehot_df, df, "BldgType", None, "2fmCon")
+        onehot_df = onehot(onehot_df, df, "HouseStyle", None, "1.5Unf")
+        onehot_df = onehot(onehot_df, df, "RoofStyle", None, "Shed")
+        onehot_df = onehot(onehot_df, df, "Exterior1st", "VinylSd", "CBlock")
+        onehot_df = onehot(onehot_df, df, "Exterior2nd", "VinylSd", "CBlock")
+        onehot_df = onehot(onehot_df, df, "Foundation", None, "Wood")
+        onehot_df = onehot(onehot_df, df, "SaleType", "WD", "Oth")
+        onehot_df = onehot(onehot_df, df, "SaleCondition", "Normal", "AdjLand")
+
+        # Fill in missing MasVnrType for rows that do have a MasVnrArea.
+        temp_df = df[["MasVnrType", "MasVnrArea"]].copy()
+        idx = (df["MasVnrArea"] != 0) & ((df["MasVnrType"] == "None") | (df["MasVnrType"].isnull()))
+        temp_df.loc[idx, "MasVnrType"] = "BrkFace"
+        onehot_df = onehot(onehot_df, temp_df, "MasVnrType", "None", "BrkCmn")
+
+        # Also add the booleans from calc_df as dummy variables.
+        onehot_df = onehot(onehot_df, df, "LotShape", None, "IR3")
+        onehot_df = onehot(onehot_df, df, "LandContour", None, "Low")
+        onehot_df = onehot(onehot_df, df, "LandSlope", None, "Sev")
+        onehot_df = onehot(onehot_df, df, "Electrical", "SBrkr", "FuseP")
+        onehot_df = onehot(onehot_df, df, "GarageType", "None", "CarPort")
+        onehot_df = onehot(onehot_df, df, "PavedDrive", None, "P")
+        onehot_df = onehot(onehot_df, df, "MiscFeature", "None", "Othr")
+
+        # Features we can probably ignore (but want to include anyway to see
+        # if they make any positive difference).
+        # Definitely ignoring Utilities: all records are "AllPub", except for
+        # one "NoSeWa" in the train set and 2 NA in the test set.
+        onehot_df = onehot(onehot_df, df, "Street", None, "Grvl")
+        onehot_df = onehot(onehot_df, df, "Alley", "None", "Grvl")
+        onehot_df = onehot(onehot_df, df, "Condition2", None, "PosA")
+        onehot_df = onehot(onehot_df, df, "RoofMatl", None, "WdShake")
+        onehot_df = onehot(onehot_df, df, "Heating", None, "Wall")
+
+        # I have these as numerical variables too.
+        onehot_df = onehot(onehot_df, df, "ExterQual", "None", "Ex")
+        onehot_df = onehot(onehot_df, df, "ExterCond", "None", "Ex")
+        onehot_df = onehot(onehot_df, df, "BsmtQual", "None", "Ex")
+        onehot_df = onehot(onehot_df, df, "BsmtCond", "None", "Ex")
+        onehot_df = onehot(onehot_df, df, "HeatingQC", "None", "Ex")
+        onehot_df = onehot(onehot_df, df, "KitchenQual", "TA", "Ex")
+        onehot_df = onehot(onehot_df, df, "FireplaceQu", "None", "Ex")
+        onehot_df = onehot(onehot_df, df, "GarageQual", "None", "Ex")
+        onehot_df = onehot(onehot_df, df, "GarageCond", "None", "Ex")
+        onehot_df = onehot(onehot_df, df, "PoolQC", "None", "Ex")
+        onehot_df = onehot(onehot_df, df, "BsmtExposure", "None", "Gd")
+        onehot_df = onehot(onehot_df, df, "BsmtFinType1", "None", "GLQ")
+        onehot_df = onehot(onehot_df, df, "BsmtFinType2", "None", "GLQ")
+        onehot_df = onehot(onehot_df, df, "Functional", "Typ", "Typ")
+        onehot_df = onehot(onehot_df, df, "GarageFinish", "None", "Fin")
+        onehot_df = onehot(onehot_df, df, "Fence", "None", "MnPrv")
+        onehot_df = onehot(onehot_df, df, "MoSold", None, None)
+
+        # Divide up the years between 1871 and 2010 in slices of 20 years.
+        year_map = pd.concat(
+            pd.Series("YearBin" + str(i + 1), index=range(1871 + i * 20, 1891 + i * 20)) for i in range(0, 7))
+
+        yearbin_df = pd.DataFrame(index=df.index)
+        yearbin_df["GarageYrBltBin"] = df.GarageYrBlt.map(year_map)
+        yearbin_df["GarageYrBltBin"].fillna("NoGarage", inplace=True)
+
+        yearbin_df["YearBuiltBin"] = df.YearBuilt.map(year_map)
+        yearbin_df["YearRemodAddBin"] = df.YearRemodAdd.map(year_map)
+
+        onehot_df = onehot(onehot_df, yearbin_df, "GarageYrBltBin", None, None)
+        onehot_df = onehot(onehot_df, yearbin_df, "YearBuiltBin", None, None)
+        onehot_df = onehot(onehot_df, yearbin_df, "YearRemodAddBin", None, None)
+
+        return onehot_df
+
+
+    # Add the one-hot encoded categorical features.
+    onehot_df = munge_onehot(train)
+    onehot_df = onehot(onehot_df, neighborhood_bin_train, "NeighborhoodBin", None, None)
+    X_train = X_train.join(onehot_df)
+
+    # These onehot columns are missing in the test data, so drop them from the
+    # training data or we might overfit on them.
+    drop_cols = [
+        "_Exterior1st_ImStucc", "_Exterior1st_Stone",
+        "_Exterior2nd_Other", "_HouseStyle_2.5Fin",
+
+        "_RoofMatl_Membran", "_RoofMatl_Metal", "_RoofMatl_Roll",
+        "_Condition2_RRAe", "_Condition2_RRAn", "_Condition2_RRNn",
+        "_Heating_Floor", "_Heating_OthW",
+
+        "_Electrical_Mix",
+        "_MiscFeature_TenC",
+        "_GarageQual_Ex", "_PoolQC_Fa"
+    ]
+    X_train.drop(drop_cols, axis=1, inplace=True)
+
+    onehot_df = munge_onehot(test)
+    onehot_df = onehot(onehot_df, neighborhood_bin_test, "NeighborhoodBin", None, None)
+    X_test = X_test.join(onehot_df)
+
+    # This column is missing in the training data. There is only one example with
+    # this value in the test set. So just drop it.
+    X_test.drop(["_MSSubClass_150"], axis=1, inplace=True)
+
+    # Drop these columns. They are either not very helpful or they cause overfitting.
+    drop_cols = [
+        "_Condition2_PosN",  # only two are not zero
+        "_MSZoning_C (all)",
+        "_MSSubClass_160",
+
+    ]
+    X_train.drop(drop_cols, axis=1, inplace=True)
+    X_test.drop(drop_cols, axis=1, inplace=True)
+    # X_train.drop("_MSSubClass_150", axis=1, inplace=True)
+
+    ################################################################################
+
+    # We take the log here because the error metric is between the log of the
+    # SalePrice and the log of the predicted price. That does mean we need to
+    # exp() the prediction to get an actual sale price.
+    Y_train = pd.DataFrame(index=X_train.index, columns=["SalePrice"])
+    Y_train["SalePrice"] = np.log(train["SalePrice"])
+
+    print(X_train.info())
+    print(X_test.info())
+
+
+    print("Training set size:", X_train.shape)
+    print("Test set size:", X_test.shape)
+
+    ####预测模块
+    xgb = XGBRegressor(learning_rate=0.1, gamma=0.05, max_depth=5, min_child_weight=1, subsample=0.6,
+                        colsample_bytree=1.0, )
+    xgb.fit(X_train,Y_train)
+    y_pred_xgb = xgb.predict(X_test)
+
+    best_alpha = 0.00099
+    regr = Lasso(alpha=best_alpha, max_iter=50000)
+    regr.fit(X_train, Y_train)
+    y_pred_lasso = regr.predict(X_test)
+
     gbr = GradientBoostingRegressor(n_estimators=150, max_depth=6, random_state=1, min_samples_split=100)
-    # rfr.fit(X_train,Y_train)
-    #
+    gbr.fit(X_train,Y_train)
+    y_pred_gbr = gbr.predict(X_test)
 
-    # impts = rfr.feature_importances_
-    # select_feature=[]
-    # for a in range(impts.size):
-    #     if impts[a]>= 0.1:
-    #         select_feature.append(a)
-    # print(select_feature)
-    # 5折交叉验证
-    valid_rfr = cross_val_score(gbr, X_train, Y_train, cv=5)
-    print("RandomForestRegressor：", valid_rfr.mean())
+    y_pred = (y_pred_xgb + y_pred_lasso +  y_pred_gbr) / 3
+    y_pred = np.exp(y_pred)
+
+    pred_df = pd.DataFrame(y_pred, index=test["Id"], columns=["SalePrice"])
+    pred_df.to_csv('XgbAndLassoAndGradientBoost_with_full.csv', header=True, index_label='Id')
+
+
+
+
+
 
 
 
