@@ -15,7 +15,7 @@ if __name__ == '__main__':
     train = pd.read_csv('data/full_train.csv')
     test = pd.read_csv('data/test.csv')
 
-    train = train[0:1601]
+    train = train[0:1540]
     # 删除id列
 
     # 删除异常条目，有些居住面积大于4000平方英尺的数据显然有问题
@@ -27,7 +27,7 @@ if __name__ == '__main__':
     test['HouseAge'] = test['YrSold'] - test['YearBuilt']  # 房屋年齡
     test['RemodAge'] = test['YrSold'] - test['YearRemodAdd']  # 重新裝修至今（年）
 
-    # test中第66个条目，填充与车库有关的其他属性
+    # test中第666个条目，填充与车库有关的其他属性
     test.loc[666, "GarageQual"] = "TA"
     test.loc[666, "GarageCond"] = "TA"
     test.loc[666, "GarageFinish"] = "Unf"
@@ -38,7 +38,8 @@ if __name__ == '__main__':
     # 均值填充LotFrontage
     lot_frontage_by_neighborhood = train["LotFrontage"].groupby(train["Neighborhood"])
 
-
+    # 初步处理数据，将一些有序特征转化为数，例如车库质量等
+    # 将一些特征中不常出现的取值，直接用0-1表示，1表示常出现的取值
     def munge(df):
         all_df = pd.DataFrame(index=df.index)
 
@@ -322,11 +323,6 @@ if __name__ == '__main__':
     def factorize(df, factor_df, column, fill_na=None):
         '''
         将传入的列对应的object属性数字化，fill_na表示是否需要填充缺失值
-        :param df:
-        :param factor_df:
-        :param column:
-        :param fill_na:
-        :return:
         '''
         factor_df[column] = df[column]
         if fill_na is not None:
@@ -534,26 +530,43 @@ if __name__ == '__main__':
     print("Training set size:", X_train.shape)
     print("Test set size:", X_test.shape)
 
-    ####预测模块
+    #### 预测模块 利用5这交叉验证作为判断依据，网络搜索最优参数
     xgb = XGBRegressor(learning_rate=0.1, gamma=0.05, max_depth=5, min_child_weight=1, subsample=0.6,
                         colsample_bytree=1.0, )
-    xgb.fit(X_train,Y_train)
-    y_pred_xgb = xgb.predict(X_test)
+    #xgb.fit(X_train,Y_train)
+    # y_pred_xgb = xgb.predict(X_test)
 
     best_alpha = 0.00099
     regr = Lasso(alpha=best_alpha, max_iter=50000)
-    regr.fit(X_train, Y_train)
-    y_pred_lasso = regr.predict(X_test)
+    #regr.fit(X_train, Y_train)
+    # y_pred_lasso = regr.predict(X_test)
 
     gbr = GradientBoostingRegressor(n_estimators=150, max_depth=6, random_state=1, min_samples_split=100)
-    gbr.fit(X_train,Y_train)
-    y_pred_gbr = gbr.predict(X_test)
+    #gbr.fit(X_train,Y_train)
+    # y_pred_gbr = gbr.predict(X_test)
 
-    y_pred = (y_pred_xgb + y_pred_lasso +  y_pred_gbr) / 3
-    y_pred = np.exp(y_pred)
+    # 5折交叉验证
+    # v_regr = cross_val_score(regr, X_train, Y_train, cv=5)
+    # v_xgb = cross_val_score(xgb, X_train, Y_train, cv=5)
+    # v_gbr = cross_val_score(gbr,X_train,Y_train,cv=5)
+    # print("xgb:",v_xgb.mean())
+    # print("regr:", v_regr.mean())
+    # print("gbr:", v_gbr.mean())
 
-    pred_df = pd.DataFrame(y_pred, index=test["Id"], columns=["SalePrice"])
-    pred_df.to_csv('XgbAndLassoAndGradientBoost_with_full.csv', header=True, index_label='Id')
+    # 线搜索最优化参数
+    gbr_params = {'n_estimators': [120, 300, 500, 1200], 'max_depth': [5, 8, 15, 20, 30, None],
+                  'min_samples_split': [1, 2, 5, 10, 15, 100],
+                  'min_samples_leaf': [1, 2, 5, 10]}
+    gs = GridSearchCV(gbr, gbr_params, n_jobs=-1, cv=5, verbose=1)
+    gs.fit(X_train,Y_train)
+    print(gs.best_params_)
+    print(gs.best_score_)
+
+    # y_pred = (y_pred_xgb + y_pred_lasso +  y_pred_gbr) / 3
+    # y_pred = np.exp(y_pred)
+    #
+    # pred_df = pd.DataFrame(y_pred, index=test["Id"], columns=["SalePrice"])
+    # pred_df.to_csv('XgbAndLassoAndGradientBoost_with_full.csv', header=True, index_label='Id')
 
 
 
